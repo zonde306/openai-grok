@@ -22,14 +22,53 @@
 - **消息预处理**
   - 支持对输入消息进行预处理，自动处理特殊标识符（例如 `<|disableSearch|>`、`<|forceConcise|>`）以及格式化消息。
 
-## 部署步骤
+## 部署步骤  
 
-### 使用 GitHub Actions 实现一键部署
+### 使用 GitHub Actions 一键部署至 Cloudflare Workers  
 
+点击下方按钮，将脚本部署到您的 Cloudflare Workers：  
 
-点击下方按钮将脚本部署到您的 Cloudflare Workers：
+[![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/MoYangking/openai-grok)  
 
-[![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/MoYangking/openai-grok)
+### 1. 部署到 Cloudflare Workers  
+点击上方 **"Deploy to Cloudflare Workers"** 按钮。  
+
+### 2. 账户配置  
+确保您拥有 **Cloudflare 账户**，然后填写以下信息：  
+
+#### **获取 Cloudflare Account ID**  
+- 进入 [Workers Dashboard](https://dash.cloudflare.com/?to=/:account/workers)  
+- 若遇到下图情况，先随便创建一个 Workers 部署  
+  ![](img/j1.png)  
+- 复制 **Account ID** 并粘贴到部署页面  
+  ![](img/j2.png)  
+
+#### **获取 Cloudflare API Token**  
+- 进入 [My Profile](https://dash.cloudflare.com/?to=/:account/workers)  
+- 创建 API Token，选择如下模板  
+  ![](img/j3.png)  
+- **一定要添加 D1 的读写权限**（非常重要！） 
+- **一定要添加 D1 的读写权限**（非常重要！） 
+- **一定要添加 D1 的读写权限**（非常重要！）  
+  ![](img/j4.png)  
+- 复制 API Token 并粘贴到部署页面  
+
+### 3. 启用 GitHub Actions  
+- 进入 **GitHub 仓库**，点击 **Repository - Actions**  
+  ![](img/j5.png)  
+- 启用 Actions  
+  ![](img/j6.png)  
+
+### 4. 运行部署流程  
+- 进入 **部署流程页面**，点击 **Workflow Enabled**  
+- 点击 **Deploy** 开始部署  
+
+### 5. 访问部署的 Worker  
+- 进入 **Cloudflare Workers 页面**，找到 `grok` Worker  
+- 访问 Worker，即可看到 grok 配置页面  
+  ![](img/j7.png)  
+- **默认密码：123**，可在 Workers 变量中修改  
+
 
 
 ## 使用说明
