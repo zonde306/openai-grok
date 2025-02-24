@@ -1,0 +1,62 @@
+name: Deploy Worker
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  repository_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    name: Deploy
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Create D1 Database and Update Config
+        run: |
+          # 安装 wrangler
+          echo "📦 安装 wrangler..."
+          npm install -g wrangler
+          
+          # 创建 D1 数据库，指定位置为 WEUR (Western Europe)
+          echo "🔧 创建 D1 数据库..."
+          DB_OUTPUT=$(wrangler d1 create a1_db --location=weur)
+          echo "数据库创建输出:"
+          echo "$DB_OUTPUT"
+          
+          # 使用新的方式提取数据库 ID
+          DB_ID=$(echo "$DB_OUTPUT" | grep "database_id" | cut -d'"' -f2)
+          echo "📝 提取的数据库 ID: $DB_ID"
+          
+          if [ -z "$DB_ID" ]; then
+            echo "❌ 无法提取数据库 ID"
+            exit 1
+          fi
+          
+          # 更新 wrangler.toml 文件
+          echo "✏️ 更新 wrangler.toml 文件..."
+          sed -i "s/database_id = \".*\"/database_id = \"$DB_ID\"/" wrangler.toml
+          
+          # 显示更新后的 wrangler.toml 内容
+          echo "📄 更新后的 wrangler.toml 内容:"
+          cat wrangler.toml
+          
+          # 创建 SQL 文件
+          echo "📝 创建 schema.sql 文件..."
+          echo "CREATE TABLE IF NOT EXISTS config (id INTEGER PRIMARY KEY, data TEXT);" > schema.sql
+          
+          # 执行 SQL 命令
+          echo "🚀 执行 SQL 命令创建表..."
+          wrangler d1 execute a1_db --file=schema.sql
+          
+          echo "✅ 数据库配置完成！"
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+
+      - name: Build & Deploy Worker
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CF_API_TOKEN }}
+          accountId: ${{ secrets.CF_ACCOUNT_ID }}
