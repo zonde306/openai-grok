@@ -5,11 +5,12 @@
  *
  * API 接口：
  *  - GET /v1/models 返回模型列表
- *  - POST /v1/chat/completions 发送消息
+ *  - POST /v1/chat/completions 发送消息（添加密钥验证）
  *
  * 配置管理页面：
  *  - 访问 /config 时需要密码验证，密码由环境变量 CONFIG_PASSWORD 设置
  *  - 未登录时重定向到 /config/login，登录成功后写入 Cookie
+ *  - 显示 API 密钥提示
  */
 
 const TARGET_URL = "https://grok.com/rest/app-chat/conversations/new";
@@ -32,7 +33,6 @@ const USER_AGENTS = [
 
 /* ========== 数据库操作封装 ========== */
 async function getConfig(env) {
-  // 创建表(如果不存在)
   await env.D1_DB.prepare(`
     CREATE TABLE IF NOT EXISTS config (
       id INTEGER PRIMARY KEY,
@@ -40,7 +40,6 @@ async function getConfig(env) {
     )
   `).run();
 
-  // 尝试从 id=1 的记录中读取配置
   let row = await env.D1_DB.prepare("SELECT data FROM config WHERE id = 1").first();
   if (row && row.data) {
     try {
@@ -49,7 +48,6 @@ async function getConfig(env) {
       console.error("配置 JSON 解析错误:", e);
     }
   }
-  // 如果不存在则返回默认配置，并写入数据库
   const defaultConfig = {
     cookies: [],
     last_cookie_index: { "grok-2": 0, "grok-3": 0, "grok-3-thinking": 0 },
@@ -61,7 +59,6 @@ async function getConfig(env) {
 
 async function setConfig(config, env) {
   const jsonStr = JSON.stringify(config);
-  // 使用 REPLACE INTO 保证 id=1 的记录存在
   await env.D1_DB.prepare(
     "REPLACE INTO config (id, data) VALUES (1, ?)"
   ).bind(jsonStr).run();
@@ -137,6 +134,23 @@ async function handleModels() {
 }
 
 async function handleChatCompletions(request, env) {
+  // 获取 Authorization 头并验证密钥
+  const authHeader = request.headers.get("Authorization");
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return new Response(JSON.stringify({ error: "Missing or invalid Authorization header" }), {
+      status: 401,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+  const token = authHeader.split(" ")[1];
+  if (token !== env.CONFIG_PASSWORD) {
+    return new Response(JSON.stringify({ error: "Invalid API key" }), {
+      status: 401,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  // 密钥验证通过，继续处理请求
   try {
     const reqJson = await request.json();
     const streamFlag = reqJson.stream || false;
@@ -156,7 +170,6 @@ async function handleChatCompletions(request, env) {
     }
     const { disableSearch, forceConcise, messages: newMessages } = magic(messages);
     const formattedMessage = formatMessage(newMessages);
-    // reasoning 模式判断：若模型名称长度大于6，则认为是 reasoning 模式，同时取前6字符
     const isReasoning = model.length > 6;
     model = model.substring(0, 6);
     if (streamFlag) {
@@ -237,9 +250,8 @@ async function sendMessageStream(message, model, disableSearch, forceConcise, is
       const { done, value } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
-      // 按换行符分割，确保每行是完整的 JSON 字符串
       let lines = buffer.split("\n");
-      buffer = lines.pop(); // 保留最后不完整的部分
+      buffer = lines.pop();
       for (const line of lines) {
         const trimmed = line.trim();
         if (!trimmed) continue;
@@ -395,7 +407,6 @@ async function sendMessageNonStream(message, model, disableSearch, forceConcise,
 }
 
 /* ========== 登录与认证 ========== */
-// 检查请求 Cookie 是否包含正确的认证信息
 async function requireAuth(request, env) {
   const cookieHeader = request.headers.get("Cookie") || "";
   const match = cookieHeader.match(/config_auth=([^;]+)/);
@@ -405,7 +416,6 @@ async function requireAuth(request, env) {
   return false;
 }
 
-// 登录页面（美化版）
 function loginPage() {
   const html = `
   <!DOCTYPE html>
@@ -436,12 +446,10 @@ function loginPage() {
   return new Response(html, { headers: { "Content-Type": "text/html" } });
 }
 
-// 处理登录请求
 async function handleLogin(request, env) {
   const formData = await request.formData();
   const password = formData.get("password") || "";
   if (password === env.CONFIG_PASSWORD) {
-    // 构造绝对 URL 重定向
     const redirectURL = new URL("/config", request.url).toString();
     return new Response("", {
       status: 302,
@@ -486,6 +494,7 @@ async function configPage(request, env) {
     <body>
       <div class="container">
         <h1>配置管理</h1>
+        <p><strong>API Key:</strong> 与配置密码相同</p> <!-- 新增提示 -->
         <h2>当前 Cookies</h2>
         <table>
           <thead>
@@ -558,7 +567,6 @@ async function updateConfig(request, env) {
     }
   }
   await setConfig(config, env);
-  // 构造绝对 URL 重定向
   return Response.redirect(new URL("/config", request.url).toString(), 302);
 }
 
@@ -566,12 +574,10 @@ async function updateConfig(request, env) {
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
-    // 根路径重定向到 /config
     if (url.pathname === "/" || url.pathname === "") {
       return Response.redirect(new URL("/config", request.url).toString(), 302);
     }
     
-    // 处理 /config 相关页面
     if (url.pathname.startsWith("/config")) {
       if (url.pathname === "/config/login") {
         if (request.method === "GET") {
@@ -580,7 +586,6 @@ export default {
           return handleLogin(request, env);
         }
       }
-      // 对其他 /config 路径先检查登录
       if (!(await requireAuth(request, env))) {
         return Response.redirect(new URL("/config/login", request.url).toString(), 302);
       }
