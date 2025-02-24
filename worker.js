@@ -33,12 +33,12 @@ const USER_AGENTS = [
 
 /* ========== 数据库操作封装 ========== */
 async function getConfig(env) {
-  await env.D1_DB.prepare(`
-    CREATE TABLE IF NOT EXISTS config (
+  await env.D1_DB.prepare(
+    `CREATE TABLE IF NOT EXISTS config (
       id INTEGER PRIMARY KEY,
       data TEXT NOT NULL
-    )
-  `).run();
+    )`
+  ).run();
 
   let row = await env.D1_DB.prepare("SELECT data FROM config WHERE id = 1").first();
   if (row && row.data) {
@@ -417,8 +417,8 @@ async function requireAuth(request, env) {
 }
 
 function loginPage() {
-  const html = `
-  <!DOCTYPE html>
+  const html = 
+  `<!DOCTYPE html>
   <html>
   <head>
     <meta charset="UTF-8">
@@ -441,8 +441,7 @@ function loginPage() {
       </form>
     </div>
   </body>
-  </html>
-  `;
+  </html>`;
   return new Response(html, { headers: { "Content-Type": "text/html" } });
 }
 
@@ -451,10 +450,14 @@ async function handleLogin(request, env) {
   const password = formData.get("password") || "";
   if (password === env.CONFIG_PASSWORD) {
     const redirectURL = new URL("/config", request.url).toString();
+    // 根据请求协议动态设置 Cookie 属性，开发测试时可支持 HTTP（生产环境建议使用 HTTPS 并开启 Secure）
+    const urlObj = new URL(request.url);
+    const isHttps = urlObj.protocol === "https:";
+    const cookieHeader = `config_auth=${env.CONFIG_PASSWORD}; Path=/; HttpOnly; ${isHttps ? "Secure; " : ""}SameSite=Strict`;
     return new Response("", {
       status: 302,
       headers: {
-        "Set-Cookie": `config_auth=${env.CONFIG_PASSWORD}; Path=/; HttpOnly; Secure; SameSite=Strict`,
+        "Set-Cookie": cookieHeader,
         "Location": redirectURL,
       },
     });
@@ -466,8 +469,8 @@ async function handleLogin(request, env) {
 /* ========== 配置管理页面 ========== */
 async function configPage(request, env) {
   const config = await getConfig(env);
-  const html = `
-  <!DOCTYPE html>
+  const html = 
+  `<!DOCTYPE html>
   <html>
     <head>
       <meta charset="UTF-8">
@@ -494,7 +497,7 @@ async function configPage(request, env) {
     <body>
       <div class="container">
         <h1>配置管理</h1>
-        <p><strong>API Key:</strong> 与配置密码相同</p> <!-- 新增提示 -->
+        <p><strong>API Key:</strong> 与配置密码相同</p>
         <h2>当前 Cookies</h2>
         <table>
           <thead>
@@ -505,8 +508,8 @@ async function configPage(request, env) {
             </tr>
           </thead>
           <tbody>
-            ${config.cookies.map((cookie, index) => `
-              <tr>
+            ${config.cookies.map((cookie, index) => 
+              `<tr>
                 <td>${index + 1}</td>
                 <td>${cookie}</td>
                 <td>
@@ -516,8 +519,8 @@ async function configPage(request, env) {
                     <button type="submit" class="btn-danger">删除</button>
                   </form>
                 </td>
-              </tr>
-            `).join('')}
+              </tr>`
+            ).join('')}
           </tbody>
         </table>
         <p>Temporary Mode: <strong>${config.temporary_mode ? "开启" : "关闭"}</strong></p>
@@ -542,8 +545,7 @@ async function configPage(request, env) {
         </div>
       </div>
     </body>
-  </html>
-  `;
+  </html>`;
   return new Response(html, { headers: { "Content-Type": "text/html" } });
 }
 
