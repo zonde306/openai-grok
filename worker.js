@@ -1,20 +1,24 @@
 /**
- * Cloudflare Workers 脚本
+ * 改进后的 Cloudflare Workers 脚本
  *
- * 使用 D1 SQL 数据库存储配置（表名：config, 仅操作 id=1 的记录）
+ * 功能：
+ *  - API 接口：
+ *      - GET /v1/models 返回模型列表
+ *      - POST /v1/chat/completions 发送消息（需 API 密钥验证）
+ *      - POST /v1/rate-limits 检查调用频率
+ *  - 配置管理页面：
+ *      - /config 系列接口，通过环境变量 CONFIG_PASSWORD 控制访问
+ *      - 加载页面时，对每个 cookie 验证所有模型状态（仅检查 "grok-2" 和 "grok-3"），
+ *        并在页面中显示每个 cookie 的状态以及各模型状态，同时对过长的 Cookie 进行截断显示
  *
- * API 接口：
- *  - GET /v1/models 返回模型列表
- *  - POST /v1/chat/completions 发送消息（添加密钥验证）
- *
- * 配置管理页面：
- *  - 访问 /config 时需要密码验证，密码由环境变量 CONFIG_PASSWORD 设置
- *  - 未登录时重定向到 /config/login，登录成功后写入 Cookie
- *  - 显示 API 密钥提示
+ * 使用 D1 SQL 数据库存储配置（表名：config，操作 id=1 的记录）
  */
 
 const TARGET_URL = "https://grok.com/rest/app-chat/conversations/new";
+const CHECK_URL = "https://grok.com/rest/rate-limits";
 const MODELS = ["grok-2", "grok-3", "grok-3-thinking"];
+// 仅检查与显示 "grok-2" 和 "grok-3" 的状态，不检查 "grok-3-thinking"
+const MODELS_TO_CHECK = ["grok-2", "grok-3"];
 const USER_AGENTS = [
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
@@ -30,6 +34,25 @@ const USER_AGENTS = [
   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
   "Mozilla/5.0 (X11; Linux i686; rv:124.0) Gecko/20100101 Firefox/124.0",
 ];
+
+/* ========== 辅助函数：请求超时 ========== */
+async function fetchWithTimeout(url, options, timeout = 5000) {
+  return Promise.race([
+    fetch(url, options),
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("请求超时")), timeout)
+    ),
+  ]);
+}
+
+/* ========== 辅助函数：截断过长的 Cookie ========== */
+function truncateCookie(cookie) {
+  const maxLen = 30;
+  if (cookie.length > maxLen) {
+    return cookie.slice(0, 10) + "..." + cookie.slice(-10);
+  }
+  return cookie;
+}
 
 /* ========== 数据库操作封装 ========== */
 async function getConfig(env) {
@@ -59,9 +82,9 @@ async function getConfig(env) {
 
 async function setConfig(config, env) {
   const jsonStr = JSON.stringify(config);
-  await env.D1_DB.prepare(
-    "REPLACE INTO config (id, data) VALUES (1, ?)"
-  ).bind(jsonStr).run();
+  await env.D1_DB.prepare("REPLACE INTO config (id, data) VALUES (1, ?)")
+    .bind(jsonStr)
+    .run();
 }
 
 /* ========== Cookie 轮询 ========== */
@@ -74,7 +97,76 @@ async function getNextAccount(model, env) {
   const current = ((config.last_cookie_index[model] || 0) + 1) % num;
   config.last_cookie_index[model] = current;
   await setConfig(config, env);
+  // 简化日志输出
   return config.cookies[current];
+}
+
+/* ========== 请求头封装 ========== */
+function getCommonHeaders(cookie) {
+  return {
+    "Accept": "*/*",
+    "Content-Type": "application/json",
+    "Origin": "https://grok.com",
+    "Referer": "https://grok.com/",
+    "Cookie": cookie,
+    "User-Agent": USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)],
+  };
+}
+
+/* ========== 检查 cookie 与模型调用限额 ========== */
+/**
+ * 使用指定 cookie 调用 CHECK_URL 接口，返回 JSON 数据（带超时保护）
+ */
+async function checkRateLimitWithCookie(model, cookie, isReasoning) {
+  const headers = getCommonHeaders(cookie);
+  const payload = {
+    requestKind: isReasoning ? "REASONING" : "DEFAULT",
+    modelName: model,
+  };
+  const response = await fetchWithTimeout(CHECK_URL, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    throw new Error(`Rate limit check failed for model ${model}, status: ${response.status}`);
+  }
+  const data = await response.json();
+  return data;
+}
+
+/**
+ * 检查单个 cookie 的状态：
+ *  - expired：如果用模型 "grok-2" 测试失败，则认为该 cookie 已过期
+ *  - 对 MODELS_TO_CHECK 中的模型检查剩余查询次数，返回数组 rateLimitDetails
+ */
+async function checkCookieStatus(cookie) {
+  let expired = false;
+  let rateLimited = false;
+  let rateLimitDetails = [];
+  try {
+    await checkRateLimitWithCookie("grok-2", cookie, false);
+  } catch (e) {
+    expired = true;
+  }
+  if (!expired) {
+    try {
+      rateLimitDetails = await Promise.all(MODELS_TO_CHECK.map(async (model) => {
+        try {
+          const data = await checkRateLimitWithCookie(model, cookie, false);
+          return { model, remainingQueries: data.remainingQueries };
+        } catch (e) {
+          return { model, error: e.toString(), remainingQueries: 0 };
+        }
+      }));
+      if (rateLimitDetails.every(detail => detail.remainingQueries === 0)) {
+        rateLimited = true;
+      }
+    } catch (e) {
+      console.error("Error checking rate limits:", e);
+    }
+  }
+  return { expired, rateLimited, rateLimitDetails };
 }
 
 /* ========== 消息预处理 ========== */
@@ -134,7 +226,6 @@ async function handleModels() {
 }
 
 async function handleChatCompletions(request, env) {
-  // 获取 Authorization 头并验证密钥
   const authHeader = request.headers.get("Authorization");
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
     return new Response(JSON.stringify({ error: "Missing or invalid Authorization header" }), {
@@ -149,8 +240,6 @@ async function handleChatCompletions(request, env) {
       headers: { "Content-Type": "application/json" },
     });
   }
-
-  // 密钥验证通过，继续处理请求
   try {
     const reqJson = await request.json();
     const streamFlag = reqJson.stream || false;
@@ -178,6 +267,66 @@ async function handleChatCompletions(request, env) {
       return await sendMessageNonStream(formattedMessage, model, disableSearch, forceConcise, isReasoning, env);
     }
   } catch (e) {
+    console.error("处理 chat completions 出错:", e);
+    return new Response(JSON.stringify({ error: e.toString() }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+}
+
+/* ========== 检查调用频率 ========== */
+async function handleRateLimits(request, env) {
+  try {
+    const reqJson = await request.json();
+    const model = reqJson.model;
+    const isReasoning = !!reqJson.isReasoning;
+    if (!MODELS.includes(model)) {
+      return new Response(JSON.stringify({ error: "模型不可用" }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return await checkRateLimit(model, isReasoning, env);
+  } catch (e) {
+    console.error("检查调用频率出错:", e);
+    return new Response(JSON.stringify({ error: e.toString() }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+}
+
+async function checkRateLimit(model, isReasoning, env) {
+  let cookie;
+  try {
+    cookie = await getNextAccount(model, env);
+  } catch (e) {
+    return new Response(JSON.stringify({ error: e.toString() }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+  const headers = getCommonHeaders(cookie);
+  const payload = {
+    requestKind: isReasoning ? "REASONING" : "DEFAULT",
+    modelName: model,
+  };
+  try {
+    const response = await fetchWithTimeout(CHECK_URL, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      throw new Error("调用频率检查失败");
+    }
+    const data = await response.json();
+    return new Response(JSON.stringify(data), {
+      headers: { "Content-Type": "application/json" },
+    });
+  } catch (e) {
+    console.error("调用频率检查异常:", e);
     return new Response(JSON.stringify({ error: e.toString() }), {
       status: 500,
       headers: { "Content-Type": "application/json" },
@@ -196,16 +345,10 @@ async function sendMessageStream(message, model, disableSearch, forceConcise, is
       headers: { "Content-Type": "application/json" },
     });
   }
-  const headers = {
-    Accept: "*/*",
-    "Content-Type": "application/json",
-    Origin: "https://grok.com",
-    Referer: "https://grok.com/",
-    Cookie: cookie,
-    "User-Agent": USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)],
-  };
+  const headers = getCommonHeaders(cookie);
+  const config = await getConfig(env);
   const payload = {
-    temporary: true,
+    temporary: config.temporary_mode,
     modelName: model,
     message: message,
     fileAttachments: [],
@@ -230,7 +373,7 @@ async function sendMessageStream(message, model, disableSearch, forceConcise, is
     headers,
     body: JSON.stringify(payload),
   };
-  const response = await fetch(TARGET_URL, init);
+  const response = await fetchWithTimeout(TARGET_URL, init);
   if (!response.ok) {
     return new Response(JSON.stringify({ error: "发送消息失败" }), {
       status: 500,
@@ -296,7 +439,7 @@ async function sendMessageStream(message, model, disableSearch, forceConcise, is
             return;
           }
         } catch (e) {
-          console.error("JSON parse error:", e, "in line:", trimmed);
+          console.error("JSON 解析错误:", e, "行内容:", trimmed);
         }
       }
     }
@@ -350,16 +493,10 @@ async function sendMessageNonStream(message, model, disableSearch, forceConcise,
       headers: { "Content-Type": "application/json" },
     });
   }
-  const headers = {
-    Accept: "*/*",
-    "Content-Type": "application/json",
-    Origin: "https://grok.com",
-    Referer: "https://grok.com/",
-    Cookie: cookie,
-    "User-Agent": USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)],
-  };
+  const headers = getCommonHeaders(cookie);
+  const config = await getConfig(env);
   const payload = {
-    temporary: true,
+    temporary: config.temporary_mode,
     modelName: model,
     message: message,
     fileAttachments: [],
@@ -384,7 +521,7 @@ async function sendMessageNonStream(message, model, disableSearch, forceConcise,
     headers,
     body: JSON.stringify(payload),
   };
-  const response = await fetch(TARGET_URL, init);
+  const response = await fetchWithTimeout(TARGET_URL, init);
   if (!response.ok) {
     return new Response(JSON.stringify({ error: "发送消息失败" }), {
       status: 500,
@@ -392,15 +529,12 @@ async function sendMessageNonStream(message, model, disableSearch, forceConcise,
     });
   }
   const fullText = await response.text();
-
-  // 对返回的多行 JSON 数据进行处理，提取最终回复文本
   let finalMessage = "";
   const lines = fullText.split("\n").filter(line => line.trim() !== "");
   for (const line of lines) {
     try {
       const data = JSON.parse(line);
       if (data?.result?.response) {
-        // 如果存在 modelResponse，则直接使用其中的 message
         if (data.result.response.modelResponse && data.result.response.modelResponse.message) {
           finalMessage = data.result.response.modelResponse.message;
           break;
@@ -412,7 +546,6 @@ async function sendMessageNonStream(message, model, disableSearch, forceConcise,
       console.error("JSON 解析错误:", e, "行内容:", line);
     }
   }
-
   const openai_response = {
     id: "chatcmpl-" + crypto.randomUUID(),
     object: "chat.completion",
@@ -471,7 +604,6 @@ async function handleLogin(request, env) {
   const password = formData.get("password") || "";
   if (password === env.CONFIG_PASSWORD) {
     const redirectURL = new URL("/config", request.url).toString();
-    // 根据请求协议动态设置 Cookie 属性，开发测试时可支持 HTTP（生产环境建议使用 HTTPS 并开启 Secure）
     const urlObj = new URL(request.url);
     const isHttps = urlObj.protocol === "https:";
     const cookieHeader = `config_auth=${env.CONFIG_PASSWORD}; Path=/; HttpOnly; ${isHttps ? "Secure; " : ""}SameSite=Strict`;
@@ -490,6 +622,48 @@ async function handleLogin(request, env) {
 /* ========== 配置管理页面 ========== */
 async function configPage(request, env) {
   const config = await getConfig(env);
+  let cookieStatuses = [];
+  try {
+    cookieStatuses = await Promise.all(
+      config.cookies.map(cookie =>
+        checkCookieStatus(cookie).catch(e => ({ expired: true, rateLimited: false, rateLimitDetails: [] }))
+      )
+    );
+  } catch (e) {
+    console.error("Error checking cookie statuses:", e);
+  }
+  
+  const tableRows = config.cookies.map((cookie, index) => {
+    const status = cookieStatuses[index] || { expired: true, rateLimited: false, rateLimitDetails: [] };
+    const cookieStateHtml = status.expired 
+                              ? '<span style="color:red;">已过期</span>' 
+                              : '<span style="color:green;">有效</span>';
+    const rateLimitHtml = status.expired 
+                              ? '--'
+                              : status.rateLimitDetails.map(detail => {
+                                  if (detail.error) {
+                                    return `${detail.model}: <span style="color:red;">错误(${detail.error})</span>`;
+                                  } else {
+                                    return detail.remainingQueries > 0 
+                                      ? `${detail.model}: <span style="color:green;">有效 (剩余: ${detail.remainingQueries})</span>`
+                                      : `${detail.model}: <span style="color:red;">限额已达</span>`;
+                                  }
+                                }).join(" | ");
+    return `<tr>
+      <td>${index + 1}</td>
+      <td>${truncateCookie(cookie)}</td>
+      <td>${cookieStateHtml}</td>
+      <td>${rateLimitHtml}</td>
+      <td>
+         <form method="POST" action="/config" class="form-inline">
+            <input type="hidden" name="action" value="delete_one">
+            <input type="hidden" name="index" value="${index}">
+            <button type="submit" class="btn-danger">删除</button>
+         </form>
+      </td>
+    </tr>`;
+  }).join('');
+  
   const html = 
   `<!DOCTYPE html>
   <html>
@@ -525,23 +699,13 @@ async function configPage(request, env) {
             <tr>
               <th>#</th>
               <th>Cookie</th>
+              <th>Cookie状态</th>
+              <th>模型状态</th>
               <th>操作</th>
             </tr>
           </thead>
           <tbody>
-            ${config.cookies.map((cookie, index) => 
-              `<tr>
-                <td>${index + 1}</td>
-                <td>${cookie}</td>
-                <td>
-                  <form method="POST" action="/config" class="form-inline">
-                    <input type="hidden" name="action" value="delete_one">
-                    <input type="hidden" name="index" value="${index}">
-                    <button type="submit" class="btn-danger">删除</button>
-                  </form>
-                </td>
-              </tr>`
-            ).join('')}
+            ${tableRows}
           </tbody>
         </table>
         <p>Temporary Mode: <strong>${config.temporary_mode ? "开启" : "关闭"}</strong></p>
@@ -619,6 +783,8 @@ export default {
       }
     } else if (url.pathname.startsWith("/v1/models")) {
       return handleModels();
+    } else if (url.pathname.startsWith("/v1/rate-limits")) {
+      return handleRateLimits(request, env);
     } else if (url.pathname.startsWith("/v1/chat/completions")) {
       return handleChatCompletions(request, env);
     }
