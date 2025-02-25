@@ -392,13 +392,34 @@ async function sendMessageNonStream(message, model, disableSearch, forceConcise,
     });
   }
   const fullText = await response.text();
+
+  // 对返回的多行 JSON 数据进行处理，提取最终回复文本
+  let finalMessage = "";
+  const lines = fullText.split("\n").filter(line => line.trim() !== "");
+  for (const line of lines) {
+    try {
+      const data = JSON.parse(line);
+      if (data?.result?.response) {
+        // 如果存在 modelResponse，则直接使用其中的 message
+        if (data.result.response.modelResponse && data.result.response.modelResponse.message) {
+          finalMessage = data.result.response.modelResponse.message;
+          break;
+        } else if (typeof data.result.response.token === "string") {
+          finalMessage += data.result.response.token;
+        }
+      }
+    } catch (e) {
+      console.error("JSON 解析错误:", e, "行内容:", line);
+    }
+  }
+
   const openai_response = {
     id: "chatcmpl-" + crypto.randomUUID(),
     object: "chat.completion",
     created: Math.floor(Date.now() / 1000),
     model: model,
     choices: [
-      { index: 0, message: { role: "assistant", content: fullText }, finish_reason: "completed" },
+      { index: 0, message: { role: "assistant", content: finalMessage }, finish_reason: "completed" },
     ],
   };
   return new Response(JSON.stringify(openai_response), {
