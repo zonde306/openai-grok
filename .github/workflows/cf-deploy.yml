@@ -24,8 +24,8 @@ jobs:
           DB_LIST=$(wrangler d1 list)
           if echo "$DB_LIST" | grep -q "a1_db"; then
             echo "✅ 数据库已存在，获取数据库ID"
-            # 使用更可靠的方式提取数据库ID
-            DB_ID=$(echo "$DB_LIST" | grep "a1_db" | sed -E 's/([a-zA-Z0-9-]+)\s+a1_db.*/\1/')
+            # 提取第一列的数据库ID（去除所有其他信息）
+            DB_ID=$(echo "$DB_LIST" | grep "a1_db" | awk '{print $1}')
             echo "获取到的数据库 ID: $DB_ID"
           else
             # 创建 D1 数据库，指定位置为 WEUR (Western Europe)
@@ -39,9 +39,12 @@ jobs:
             echo "📝 提取的数据库 ID: $DB_ID"
           fi
           
+          # 清理数据库 ID（移除可能的特殊字符）
+          DB_ID=$(echo "$DB_ID" | tr -d '│' | xargs)
+          
           # 验证数据库 ID
-          if [ -z "$DB_ID" ] || [ "$DB_ID" = "│" ]; then
-            echo "❌ 无法正确获取数据库 ID"
+          if [ -z "$DB_ID" ] || [[ ! "$DB_ID" =~ ^[a-zA-Z0-9-]+$ ]]; then
+            echo "❌ 无法正确获取数据库 ID 或 ID 格式不正确: '$DB_ID'"
             exit 1
           fi
           
@@ -61,7 +64,7 @@ jobs:
           
           # 执行 SQL 命令
           echo "🚀 执行 SQL 命令创建表..."
-          wrangler d1 execute a1_db --file=schema.sql
+          wrangler d1 execute a1_db --file=schema.sql --remote
           
           echo "✅ 数据库配置完成！"
         env:
