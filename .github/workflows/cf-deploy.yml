@@ -54,14 +54,6 @@ jobs:
           echo "📄 更新后的 wrangler.toml 内容:"
           cat wrangler.toml
           
-          # 创建 SQL 文件
-          echo "📝 创建 schema.sql 文件..."
-          echo "CREATE TABLE IF NOT EXISTS config (id INTEGER PRIMARY KEY, data TEXT);" > schema.sql
-          
-          # 执行 SQL 命令
-          echo "🚀 执行 SQL 命令创建表..."
-          wrangler d1 execute a1_db --file=schema.sql --remote
-          
           echo "✅ 数据库配置完成！"
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
