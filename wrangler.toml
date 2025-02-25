@@ -10,3 +10,7 @@ database_id = "PLACEHOLDER_DB_ID"
 
 [vars]
 CONFIG_PASSWORD = "123"
+
+[observability]
+enabled = true
+head_sampling_rate = 1 
