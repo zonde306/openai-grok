@@ -24,8 +24,7 @@ jobs:
           DB_LIST=$(wrangler d1 list)
           if echo "$DB_LIST" | grep -q "a1_db"; then
             echo "✅ 数据库已存在，获取数据库ID"
-            # 使用更精确的方式提取数据库ID
-            DB_ID=$(echo "$DB_LIST" | grep "a1_db" | tr -s ' ' | cut -d ' ' -f 1 | tr -d '│')
+            DB_ID=$(echo "$DB_LIST" | grep "a1_db" | grep -Eo '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
             echo "获取到的数据库 ID: $DB_ID"
           else
             # 创建 D1 数据库，指定位置为 WEUR (Western Europe)
@@ -39,12 +38,9 @@ jobs:
             echo "📝 提取的数据库 ID: $DB_ID"
           fi
           
-          # 清理并验证数据库 ID
-          DB_ID=$(echo "$DB_ID" | xargs)
-          
-          # 验证数据库 ID
-          if [ -z "$DB_ID" ] || [[ ! "$DB_ID" =~ ^[a-zA-Z0-9-]+$ ]]; then
-            echo "❌ 无法正确获取数据库 ID 或 ID 格式不正确: '$DB_ID'"
+          # 验证数据库 ID 格式
+          if [[ ! "$DB_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+            echo "❌ 数据库 ID 格式不正确: $DB_ID"
             exit 1
           fi
           
