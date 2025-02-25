@@ -19,11 +19,14 @@ jobs:
           echo "📦 安装 wrangler..."
           npm install -g wrangler
           
-          # 检查数据库是否已存在
+          # 检查数据库是否已存在并获取ID
           echo "🔍 检查数据库是否存在..."
-          if wrangler d1 list | grep -q "a1_db"; then
-            echo "✅ 数据库已存在，跳过创建步骤"
-            DB_ID=$(wrangler d1 list | grep "a1_db" | awk '{print $1}')
+          DB_LIST=$(wrangler d1 list)
+          if echo "$DB_LIST" | grep -q "a1_db"; then
+            echo "✅ 数据库已存在，获取数据库ID"
+            # 使用更可靠的方式提取数据库ID
+            DB_ID=$(echo "$DB_LIST" | grep "a1_db" | sed -E 's/([a-zA-Z0-9-]+)\s+a1_db.*/\1/')
+            echo "获取到的数据库 ID: $DB_ID"
           else
             # 创建 D1 数据库，指定位置为 WEUR (Western Europe)
             echo "🔧 创建新的 D1 数据库..."
@@ -32,14 +35,17 @@ jobs:
             echo "$DB_OUTPUT"
             
             # 提取数据库 ID
-            DB_ID=$(echo "$DB_OUTPUT" | grep "database_id" | cut -d'"' -f2)
+            DB_ID=$(echo "$DB_OUTPUT" | grep "database_id" | sed -E 's/.*"database_id": "([^"]+)".*/\1/')
             echo "📝 提取的数据库 ID: $DB_ID"
           fi
           
-          if [ -z "$DB_ID" ]; then
-            echo "❌ 无法获取数据库 ID"
+          # 验证数据库 ID
+          if [ -z "$DB_ID" ] || [ "$DB_ID" = "│" ]; then
+            echo "❌ 无法正确获取数据库 ID"
             exit 1
           fi
+          
+          echo "使用的数据库 ID: $DB_ID"
           
           # 更新 wrangler.toml 文件
           echo "✏️ 更新 wrangler.toml 文件..."
