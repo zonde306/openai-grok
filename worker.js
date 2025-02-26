@@ -8,7 +8,7 @@
  *      - POST /v1/rate-limits 检查调用频率
  *  - 配置管理页面：
  *      - /config 系列接口，通过环境变量 CONFIG_PASSWORD 控制访问
- *      - 加载页面时，对每个 cookie 验证所有模型状态（仅检查 "grok-2" 和 "grok-3"），
+ *      - 加载页面时，对每个 cookie 验证所有模型状态，
  *        并在页面中显示每个 cookie 的状态以及各模型状态，同时对过长的 Cookie 进行截断显示
  *
  * 使用 D1 SQL 数据库存储配置（表名：config，操作 id=1 的记录）
@@ -17,8 +17,7 @@
 const TARGET_URL = "https://grok.com/rest/app-chat/conversations/new";
 const CHECK_URL = "https://grok.com/rest/rate-limits";
 const MODELS = ["grok-2", "grok-3", "grok-3-thinking"];
-// 仅检查与显示 "grok-2" 和 "grok-3" 的状态，不检查 "grok-3-thinking"
-const MODELS_TO_CHECK = ["grok-2", "grok-3"];
+const MODELS_TO_CHECK = ["grok-2", "grok-3", "grok-3-thinking"];
 const USER_AGENTS = [
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
@@ -155,6 +154,13 @@ async function checkCookieStatus(cookie) {
     rateLimitDetails.push({ model: "grok-3", remainingQueries: dataGrok3.remainingQueries });
   } catch (e) {
     rateLimitDetails.push({ model: "grok-3", error: e.toString(), remainingQueries: 0 });
+  }
+  // 检查 grok-3-thinking
+  try {
+    const dataGrok3Thinking = await checkRateLimitWithCookie("grok-3", cookie, true);
+    rateLimitDetails.push({ model: "grok-3-thinking", remainingQueries: dataGrok3Thinking.remainingQueries });
+  } catch (e) {
+    rateLimitDetails.push({ model: "grok-3-thinking", error: e.toString(), remainingQueries: 0 });
   }
   const rateLimited = rateLimitDetails.every(detail => detail.remainingQueries === 0);
   return { expired: false, rateLimited, rateLimitDetails };
@@ -372,7 +378,7 @@ async function sendMessageStream(message, model, disableSearch, forceConcise, is
     });
   }
 
-  // 使用 ReadableStream 优化流数据处理，避免 CPU 占用过高
+  // 使用 ReadableStream 优化流数据处理
   const stream = new ReadableStream({
     async start(controller) {
       const reader = response.body.getReader();
@@ -380,22 +386,50 @@ async function sendMessageStream(message, model, disableSearch, forceConcise, is
       const encoder = new TextEncoder();
       let buffer = "";
       let thinking = 2;
+      let batchSize = 0;
+      let batchContent = "";
+      const MAX_BATCH_SIZE = 5;
+      const BATCH_INTERVAL = 50;
+      let lastBatchTime = Date.now();
+
+      const processBatch = async () => {
+        if (batchContent) {
+          const chunkData = {
+            id: "chatcmpl-" + crypto.randomUUID(),
+            object: "chat.completion.chunk",
+            created: Math.floor(Date.now() / 1000),
+            model: model,
+            choices: [
+              { index: 0, delta: { content: batchContent }, finish_reason: null },
+            ],
+          };
+          controller.enqueue(encoder.encode("data: " + JSON.stringify(chunkData) + "\n\n"));
+          batchContent = "";
+          batchSize = 0;
+        }
+      };
+
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
+
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split("\n");
         buffer = lines.pop();
+
         for (const line of lines) {
           const trimmed = line.trim();
           if (!trimmed) continue;
+
           try {
             const data = JSON.parse(trimmed);
             if (!data?.result?.response || typeof data.result.response.token !== "string") {
               continue;
             }
+
             let token = data.result.response.token;
             let content = token;
+
             if (isReasoning) {
               if (thinking === 2) {
                 thinking = 1;
@@ -405,24 +439,28 @@ async function sendMessageStream(message, model, disableSearch, forceConcise, is
                 content = `\n</Thinking>\n${token}`;
               }
             }
-            const chunkData = {
-              id: "chatcmpl-" + crypto.randomUUID(),
-              object: "chat.completion.chunk",
-              created: Math.floor(Date.now() / 1000),
-              model: model,
-              choices: [
-                { index: 0, delta: { content: content }, finish_reason: null },
-              ],
-            };
-            controller.enqueue(encoder.encode("data: " + JSON.stringify(chunkData) + "\n\n"));
+
+            batchContent += content;
+            batchSize++;
+
+            // 当达到批处理阈值或距离上次发送已经过了足够时间时，发送数据
+            const now = Date.now();
+            if (batchSize >= MAX_BATCH_SIZE || (now - lastBatchTime >= BATCH_INTERVAL && batchContent)) {
+              await processBatch();
+              lastBatchTime = now;
+              // 添加微小延迟，让出 CPU
+              await new Promise(resolve => setTimeout(resolve, 1));
+            }
+
             if (data.result.response.isSoftStop) {
+              await processBatch(); // 处理剩余的批次
               const finalChunk = {
                 id: "chatcmpl-" + crypto.randomUUID(),
                 object: "chat.completion.chunk",
                 created: Math.floor(Date.now() / 1000),
                 model: model,
                 choices: [
-                  { index: 0, delta: { content: content }, finish_reason: "completed" },
+                  { index: 0, delta: { content: "" }, finish_reason: "completed" },
                 ],
               };
               controller.enqueue(encoder.encode("data: " + JSON.stringify(finalChunk) + "\n\n"));
@@ -434,6 +472,8 @@ async function sendMessageStream(message, model, disableSearch, forceConcise, is
           }
         }
       }
+
+      // 处理剩余的缓冲区数据
       if (buffer.trim() !== "") {
         try {
           const data = JSON.parse(buffer.trim());
@@ -449,25 +489,20 @@ async function sendMessageStream(message, model, disableSearch, forceConcise, is
                 content = `\n</Thinking>\n${token}`;
               }
             }
-            const chunkData = {
-              id: "chatcmpl-" + crypto.randomUUID(),
-              object: "chat.completion.chunk",
-              created: Math.floor(Date.now() / 1000),
-              model: model,
-              choices: [
-                { index: 0, delta: { content: content }, finish_reason: null },
-              ],
-            };
-            controller.enqueue(encoder.encode("data: " + JSON.stringify(chunkData) + "\n\n"));
+            batchContent += content;
           }
         } catch (e) {
           console.error("Final JSON parse error:", e, "in buffer:", buffer);
         }
       }
+
+      // 处理最后的批次
+      await processBatch();
       controller.enqueue(encoder.encode("data: [DONE]\n\n"));
       controller.close();
     }
   });
+
   return new Response(stream, {
     headers: { "Content-Type": "text/event-stream" },
   });
